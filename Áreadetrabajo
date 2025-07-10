@@ -1,0 +1,53 @@
+// Usa la geometría dibujada en el editor llamada "region"
+var aoi = region; // Tu región de interés
+
+// Define el rango de fechas
+var startDate = '2023-06-01'; // Fecha de inicio
+var endDate = '2024-05-31';   // Fecha de fin
+
+// Filtra la colección Sentinel-2 L2A (Nivel 2A, corregido con Sen2Cor)
+var collectionL2A = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(aoi) // Filtra imágenes que intersectan el AOI
+  .filterDate(startDate, endDate) // Filtra por rango de fechas
+  .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 10)); // Nubosidad menor o igual al 10%
+
+print('Número de imágenes L2A en la colección:', collectionL2A.size()); // Verifica el tamaño de la colección
+
+// Escalar las imágenes a reflectancia TOA
+var scaledCollection = collectionL2A.map(function(image) {
+  return image.multiply(0.0001).copyProperties(image, image.propertyNames());
+});
+
+// Selecciona las bandas necesarias para análisis (B2, B3, B4, B8)
+var selectedCollection = scaledCollection.select(['B2', 'B3', 'B4', 'B8']); // Azul, Verde, Rojo, NIR
+
+// Función para exportar imágenes RGB
+var exportImage = function(image) {
+  // Extraer la fecha de adquisición
+  var date = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd');
+
+  // Crear imagen RGB
+  var rgbImage = image.select(['B4', 'B3', 'B2'])
+                      .rename(['Red', 'Green', 'Blue'])
+                      .toFloat() // Asegura tipo float para exportación
+                      .reproject({crs: 'EPSG:4326', scale: 10}); // Reproyección
+
+  Export.image.toDrive({
+    image: rgbImage,
+    description: 'RGB_Set_' + date.getInfo(),
+    folder: 'EarthEngineImages',
+    region: aoi,
+    scale: 10,
+    crs: 'EPSG:4326',
+    maxPixels: 1e13
+  });
+};
+
+// Convertir colección a lista y exportar cada imagen
+var imagesList = selectedCollection.toList(selectedCollection.size());
+var nImages = selectedCollection.size().getInfo();
+
+for (var i = 0; i < nImages; i++) {
+  var image = ee.Image(imagesList.get(i));
+  exportImage(image);
+}
