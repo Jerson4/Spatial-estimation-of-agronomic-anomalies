@@ -1,0 +1,154 @@
+// Usa la geometría dibujada en el editor llamada "region"
+var aoi = region; // Tu región de interés
+
+// Define el rango de fechas
+var startDate = '2023-11-01'; // Fecha de inicio
+var endDate = '2023-12-15';   // Fecha de fin
+
+// Filtra la colección Sentinel-2 L2A (Nivel 2A, corregido con Sen2Cor)
+var collectionL2A = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(aoi) // Filtra imágenes que intersectan el AOI
+  .filterDate(startDate, endDate) // Filtra por rango de fechas
+  .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 10)); // Nubosidad menor o igual al 10%
+
+print('Número de imágenes L2A en la colección:', collectionL2A.size()); // Verifica el tamaño de la colección
+
+// Escalar las imágenes a reflectancia
+var scaledCollection = collectionL2A.map(function(image) {
+  return image.multiply(0.0001).copyProperties(image, image.propertyNames());
+});
+
+// Selecciona las bandas necesarias para análisis (B2, B3, B4, B8)
+var selectedCollection = scaledCollection.select(['B2', 'B3', 'B4', 'B8']); // Azul, Verde, Rojo, NIR
+
+// Función para exportar imágenes, índices y el stack RGB personalizado
+var exportImage = function(image) {
+  // Extraer la fecha de adquisición de la imagen (para nombrar archivos)
+  var date = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd').getInfo();
+
+  // --- Exportar RGB original (B4: Rojo, B3: Verde, B2: Azul) ---
+  var rgbImage = image.select(['B4', 'B3', 'B2'])
+                      .rename(['Red', 'Green', 'Blue'])
+                      .toFloat(); // Convertir a 32 bits
+  // Reproyectar la imagen a EPSG:4326 (WGS84)
+  rgbImage = rgbImage.reproject({crs: 'EPSG:4326', scale: 10});
+
+  Export.image.toDrive({
+    image: rgbImage,
+    description: 'RGB_Set_' + date,
+    folder: 'EarthEngineImages',
+    region: aoi,
+    scale: 10,
+    crs: 'EPSG:4326', // Establecer el CRS a EPSG:4326
+    maxPixels: 1e13
+  });
+
+  // --- Exportar cada banda individual ---
+  var bands = ['B2', 'B3', 'B4', 'B8']; // Bandas: Azul, Verde, Rojo, NIR
+  var bandNames = ['Blue', 'Green', 'Red', 'NIR']; // Nombres amigables
+  for (var i = 0; i < bands.length; i++) {
+    var singleBand = image.select([bands[i]])
+                          .rename([bandNames[i]])
+                          .toFloat(); // Convertir a 32 bits
+    // Reproyectar la banda a EPSG:4326
+    singleBand = singleBand.reproject({crs: 'EPSG:4326', scale: 10});
+
+    Export.image.toDrive({
+      image: singleBand,
+      description: bandNames[i] + '_' + date,
+      folder: 'EarthEngineImages',
+      region: aoi,
+      scale: 10,
+      crs: 'EPSG:4326', // Establecer el CRS a EPSG:4326
+      maxPixels: 1e13
+    });
+  }
+
+  // --- Calcular y exportar índices ---
+  // EVI: 2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))
+  var evi = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'BLUE': image.select('B2')
+    }
+  ).rename('EVI').toFloat(); // Convertir a 32 bits
+  // Reproyectar EVI a EPSG:4326
+  evi = evi.reproject({crs: 'EPSG:4326', scale: 10});
+
+  Export.image.toDrive({
+    image: evi,
+    description: 'EVI_' + date,
+    folder: 'EarthEngineImages',
+    region: aoi,
+    scale: 10,
+    crs: 'EPSG:4326', // Establecer el CRS a EPSG:4326
+    maxPixels: 1e13
+  });
+
+  // GNDVI: (NIR - Green) / (NIR + Green)
+  var gndvi = image.normalizedDifference(['B8', 'B3']).rename('GNDVI').toFloat(); // Convertir a 32 bits
+  // Reproyectar GNDVI a EPSG:4326
+  gndvi = gndvi.reproject({crs: 'EPSG:4326', scale: 10});
+
+  Export.image.toDrive({
+    image: gndvi,
+    description: 'GNDVI_' + date,
+    folder: 'EarthEngineImages',
+    region: aoi,
+    scale: 10,
+    crs: 'EPSG:4326', // Establecer el CRS a EPSG:4326
+    maxPixels: 1e13
+  });
+
+  // SAVI: ((NIR - RED) * (1 + L)) / (NIR + RED + L) con L = 0.5
+  var savi = image.expression(
+    '((NIR - RED) * (1 + L)) / (NIR + RED + L)', {
+      'NIR': image.select('B8'),
+      'RED': image.select('B4'),
+      'L': 0.5
+    }
+  ).rename('SAVI').toFloat(); // Convertir a 32 bits
+  // Reproyectar SAVI a EPSG:4326
+  savi = savi.reproject({crs: 'EPSG:4326', scale: 10});
+
+  Export.image.toDrive({
+    image: savi,
+    description: 'SAVI_' + date,
+    folder: 'EarthEngineImages',
+    region: aoi,
+    scale: 10,
+    crs: 'EPSG:4326', // Establecer el CRS a EPSG:4326
+    maxPixels: 1e13
+  });
+
+  // --- Crear stack de bandas RGB personalizado con los índices ---
+  // Banda R: SAVI, Banda G: GNDVI, Banda B: EVI
+  var compositeRGB = ee.Image.cat([savi, gndvi, evi]).rename(['Red', 'Green', 'Blue']).toFloat(); // Convertir a 32 bits
+  // Reproyectar el RGB compuesto a EPSG:4326
+  compositeRGB = compositeRGB.reproject({crs: 'EPSG:4326', scale: 10});
+  
+  // Imprimir la imagen compuesta en la consola y agregarla al mapa
+  print('Composite RGB (SAVI, GNDVI, EVI) para la fecha ' + date, compositeRGB);
+  Map.addLayer(compositeRGB, {min: 0, max: 1}, 'Composite_RGB_' + date);
+
+  // Exportar la imagen compuesta a Google Drive
+  Export.image.toDrive({
+    image: compositeRGB,
+    description: 'Composite_RGB_' + date,
+    folder: 'EarthEngineImages',
+    region: aoi,
+    scale: 10,
+    crs: 'EPSG:4326', // Establecer el CRS a EPSG:4326
+    maxPixels: 1e13
+  });
+};
+
+// Convertir la colección seleccionada a una lista y exportar cada imagen
+var imagesList = selectedCollection.toList(selectedCollection.size());
+var nImages = imagesList.size().getInfo();
+
+for (var i = 0; i < nImages; i++) {
+  var image = ee.Image(imagesList.get(i));
+  exportImage(image);
+}
